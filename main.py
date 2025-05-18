@@ -1,65 +1,139 @@
 import os
+import torch
+from PIL import Image
+from transformers import CLIPProcessor, CLIPModel
 import numpy as np
-from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input, decode_predictions
-from tensorflow.keras.preprocessing import image
-from PIL import Image # Used for basic image handling/error checking
 
 # --- Configuration ---
-IMAGE_FOLDER = 'images' # <-- Change this to your folder path
-TOP_N_KEYWORDS = 3 # How many top keywords to display per image
+IMAGE_FOLDER = 'images'
+# You can choose a different CLIP model, e.g., "openai/clip-vit-large-patch14"
+MODEL_NAME = "openai/clip-vit-base-patch32"
+TOP_N_CONTEXT_PROMPTS = 5 # How many top overall prompts to display for context
 
-# --- Load Pre-trained Model ---
-print("Loading ResNet50 model...")
+# Define text prompts for classification.
+# Add more prompts here to cover various aspects of nature and non-nature.
+NATURE_PROMPTS = [
+    "a photo of nature",
+    "a photo of a natural landscape",
+    "a photo of a forest",
+    "a photo of a river",
+    "a photo of grass",
+    "a photo of trees",
+    "a photo of flowers",
+    "a photo of a waterway"
+    "a photo of clouds",
+    "a photo of rocks",
+    "a photo of soil",
+    "a scene of the natural environment",
+]
+
+NON_NATURE_PROMPTS = [
+    "a photo of a city",
+    "a photo of a building",
+    "a photo of a house",
+    "a photo of a room",
+    "a photo of furniture",
+    "a photo of a car",
+    "a photo of a road",
+    "a photo of a person",
+    "a photo of food",
+    "a photo of an urban scene",
+    "a photo of an industrial area",
+    "a photo of food",
+    "an abstract image",
+    "a drawing",
+    "a painting",
+    "a screenshot",
+    "text on a screen",
+    "a close-up of an object",
+    "a photo of technical equipment",
+]
+
+# Combine all prompts for the model to process
+ALL_PROMPTS = NATURE_PROMPTS + NON_NATURE_PROMPTS
+
+# --- Setup Device ---
+# Use GPU if available, otherwise use CPU
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
+
+# --- Load CLIP Model and Processor ---
+print(f"Loading CLIP model: {MODEL_NAME}...")
 try:
-    # Load the ResNet50 model with weights pre-trained on ImageNet
-    model = ResNet50(weights='imagenet')
-    print("Model loaded successfully.")
+    processor = CLIPProcessor.from_pretrained(MODEL_NAME)
+    model = CLIPModel.from_pretrained(MODEL_NAME).to(device)
+    print("Model and processor loaded successfully.")
 except Exception as e:
     print(f"Error loading model: {e}")
-    print("Please ensure you have a stable internet connection to download weights if needed.")
+    print("Please check your internet connection and model name.")
     exit()
 
 # --- Process Images ---
-print(f"\nGetting top {TOP_N_KEYWORDS} keywords for images in folder: {IMAGE_FOLDER}")
+print(f"\nClassifying images in folder: {IMAGE_FOLDER}")
 
 if not os.path.isdir(IMAGE_FOLDER):
     print(f"Error: Folder not found at {IMAGE_FOLDER}")
     exit()
 
-image_files = [f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+image_files = [f for f in sorted(os.listdir(IMAGE_FOLDER)) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
 
 if not image_files:
     print("No supported image files found in the folder.")
     exit()
 
+print(f"Comparing images against {len(ALL_PROMPTS)} text prompts.")
+
 for image_file in image_files:
     img_path = os.path.join(IMAGE_FOLDER, image_file)
 
     try:
-        # Load and resize the image
-        img = image.load_img(img_path, target_size=(224, 224))
+        # Load the image
+        image_pil = Image.open(img_path).convert("RGB")
 
-        # Convert the image to a numpy array
-        x = image.img_to_array(img)
+        # Preprocess image and tokenize text prompts
+        # The processor handles resizing, normalization for the image
+        # and tokenization/padding for the text
+        inputs = processor(text=ALL_PROMPTS, images=image_pil, return_tensors="pt", padding=True)
 
-        # Expand dimensions to match model input shape (add batch dimension)
-        x = np.expand_dims(x, axis=0)
+        # Move inputs to the chosen device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        # Preprocess the image data (specific to ResNet50)
-        x = preprocess_input(x)
+        # --- Get Predictions ---
+        # Disable gradient calculation for inference
+        with torch.no_grad():
+            outputs = model(**inputs)
 
-        # Get predictions from the model
-        predictions = model.predict(x, verbose=0) # verbose=0 suppresses prediction progress bar
+        # Get the logits (similarity scores) for image-text pairs
+        # logits_per_image[i][j] is the similarity between image i and text j
+        logits_per_image = outputs.logits_per_image
 
-        # Decode the predictions (get human-readable labels)
-        # decode_predictions returns a list of lists, one inner list per image in the batch
-        decoded_predictions = decode_predictions(predictions, top=TOP_N_KEYWORDS)[0]
+        # Convert logits to probabilities using softmax
+        probs = logits_per_image.softmax(dim=1) # Softmax across the text prompts
 
-        # Extract just the descriptions
-        top_keywords = [description for _, description, _ in decoded_predictions]
+        # --- Determine Classification ---
+        # Get the index of the highest probability prompt
+        best_prompt_idx = probs.argmax().item()
+        best_prompt_text = ALL_PROMPTS[best_prompt_idx]
+        best_prompt_prob = probs[0, best_prompt_idx].item()
 
-        # Print the filename and the top keywords
-        print(f"{image_file} {' '.join(top_keywords)}") # Using space as separator as requested
+        # Check if the best-scoring prompt is in our list of nature prompts
+        is_nature = best_prompt_text in NATURE_PROMPTS
+
+        # --- Get Top N Context Prompts ---
+        # Get indices of top probabilities
+        top_n_indices = torch.topk(probs, TOP_N_CONTEXT_PROMPTS, dim=1).indices[0].tolist()
+
+        # Get the corresponding prompts and their probabilities
+        top_n_info = [(ALL_PROMPTS[i], probs[0, i].item()) for i in top_n_indices]
+
+        # --- Print Results ---
+        classification = "Nature" if is_nature else "Not Nature"
+
+        print(f"{image_file}: {classification}")
+        print(f"  Highest Probability Match: '{best_prompt_text}' ({best_prompt_prob:.2f})")
+        print(f"  Top {TOP_N_CONTEXT_PROMPTS} overall prompts:")
+        for prompt, prob in top_n_info:
+             print(f"    - '{prompt}': {prob:.2f}")
 
     except Exception as e:
         print(f"Error processing {image_file}: {e}")
