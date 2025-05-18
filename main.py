@@ -1,4 +1,5 @@
 import os
+import csv
 import torch
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
@@ -81,6 +82,20 @@ if not image_files:
     print("No supported image files found in the folder.")
     exit()
 
+RESULTS_FILE = 'results.csv'
+csv_writer = None
+csv_file_handle = None # To close it if opened
+
+try:
+    csv_file_handle = open(RESULTS_FILE, 'w', newline='')
+    csv_writer = csv.writer(csv_file_handle)
+    # Write header
+    csv_writer.writerow(['file_name', 'status', 'classification', 'best_prompt', 'probability'])
+    print(f"Results will be written to {RESULTS_FILE}")
+except IOError as e:
+    print(f"Warning: Could not open '{RESULTS_FILE}' for writing: {e}. Results will not be saved to CSV.")
+    # csv_writer remains None, csv_file_handle remains None
+
 print(f"Comparing images against {len(ALL_PROMPTS)} text prompts.")
 
 for image_file in image_files:
@@ -127,7 +142,7 @@ for image_file in image_files:
         top_n_info = [(ALL_PROMPTS[i], probs[0, i].item()) for i in top_n_indices]
 
         # --- Print Results ---
-        classification = "Nature" if is_nature else "Not Nature"
+        classification = "nature" if is_nature else "not_nature"
 
         print(f"{image_file}: {classification}")
         print(f"  Highest Probability Match: '{best_prompt_text}' ({best_prompt_prob:.2f})")
@@ -135,8 +150,18 @@ for image_file in image_files:
         for prompt, prob in top_n_info:
              print(f"    - '{prompt}': {prob:.2f}")
 
+        if csv_writer:
+            csv_writer.writerow([image_file, "ok", classification, best_prompt_text, f"{best_prompt_prob:.4f}"])
+
     except Exception as e:
         print(f"Error processing {image_file}: {e}")
+        if csv_writer:
+            csv_writer.writerow([image_file, "error", "", "", ""])
         continue # Continue with the next image even if one fails
+
+if csv_file_handle: # If the file was attempted to be opened
+    csv_file_handle.close()
+    if csv_writer: # If writer was successfully created (file opened)
+        print(f"\nImage classification results also saved to {RESULTS_FILE}")
 
 print("\nProcessing complete.")

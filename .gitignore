@@ -11,3 +11,6 @@ wheels/
 
 # Images
 images/
+
+# Output
+results.csv
